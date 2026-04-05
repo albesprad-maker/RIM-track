@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RIM Pro - Cloud Logistics</title>
+    
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-analytics-compat.js"></script>
+
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background-color: #f0f4f8; margin: 0; padding: 20px; }
+        .container { max-width: 1200px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
+        
+        .top-bar { display: flex; justify-content: space-between; align-items: center; background: #002f6c; color: white; padding: 15px 25px; margin: -25px -25px 25px -25px; border-radius: 12px 12px 0 0; }
+        .top-bar input, .top-bar select { padding: 8px; border-radius: 4px; border: none; outline: none; }
+        #syncStatus { font-size: 0.8rem; opacity: 0.8; }
+
+        .registration-box { background: #ffffff; border: 1px solid #d1d9e6; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+        .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: 600; font-size: 0.85rem; }
+        input, select { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }
+        
+        .btn { padding: 12px 20px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; color: white; transition: 0.2s; }
+        .btn-add { background: #2e7d32; width: 100%; margin-top: 15px; }
+        .btn-export { background: #f57c00; margin-bottom: 20px; }
+        .btn-clear { background: #000; margin-left: 10px; }
+
+        table { width: 100%; border-collapse: collapse; }
+        th { background: #f8f9fa; text-align: left; padding: 12px; border-bottom: 3px solid #002f6c; font-size: 0.85rem; }
+        td { padding: 12px; border-bottom: 1px solid #eee; font-size: 13px; }
+        
+        .badge { padding: 4px 8px; border-radius: 4px; font-weight: bold; font-family: monospace; font-size: 0.75rem; border: 1px solid; }
+        .status-PUT { background: #e3f2fd; color: #0d47a1; border-color: #bbdefb; }
+        .status-AUD { background: #fff3e0; color: #e65100; border-color: #ffe0b2; }
+        .status-CLS { background: #eeeeee; color: #616161; border-color: #e0e0e0; }
+        
+        .hidden { display: none !important; }
+        @media print { .top-bar, .registration-box, .btn-export, .no-print, .btn-clear { display: none !important; } }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="top-bar">
+        <div><strong>OPERATOR:</strong> <input type="text" id="opName" placeholder="Enter Name"></div>
+        <div id="syncStatus">📡 Connecting to Firebase...</div>
+        <div><strong>ACCESS:</strong> 
+            <select id="roleSelector" onchange="updateUI()">
+                <option value="user">User</option>
+                <option value="admin">Admin</option>
+            </select>
+        </div>
+    </div>
+
+    <div class="registration-box">
+        <div class="form-grid">
+            <div><label>RIM ID (14 Chars)</label><input type="text" id="rimId" maxlength="14" placeholder="Scan..." oninput="if(this.value.length==14) processRecord()"></div>
+            <div><label>Location</label><input type="text" id="loc" placeholder="Aisle/Shelf"></div>
+            <div><label>Status</label>
+                <select id="stat">
+                    <option value="INBOUND">INBOUND</option>
+                    <option value="PUT">PUT</option>
+                    <option value="TAG">TAG</option>
+                    <option value="AUD">AUD</option>
+                    <option value="CLS">CLS</option>
+                </select>
+            </div>
+        </div>
+        <div style="margin-top:15px;"><label>Details</label><input type="text" id="details" placeholder="Notes..."></div>
+        <button class="btn btn-add" onclick="processRecord()">+ Register Pallet</button>
+    </div>
+
+    <div style="display: flex; justify-content: space-between;">
+        <button class="btn btn-export" onclick="exportCSV()">Export to CSV</button>
+        <button id="masterClear" class="btn btn-clear hidden" onclick="clearAllData()">Clear All Records</button>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Registered By</th>
+                <th>Date/Time</th>
+                <th>RIM ID</th>
+                <th>Location</th>
+                <th>Status</th>
+                <th id="adminActionHeader" class="hidden">Actions</th>
+            </tr>
+        </thead>
+        <tbody id="mainTable"></tbody>
+    </table>
+</div>
+
+<script>
+    // --- 1. FIREBASE CONFIGURATION ---
+    const firebaseConfig = {
+        apiKey: "AIzaSyC6UnjfA4JntuFFPL7zPo64QNSTTdDbvaQ",
+        authDomain: "rim-logistics.firebaseapp.com",
+        databaseURL: "https://rim-logistics-default-rtdb.firebaseio.com",
+        projectId: "rim-logistics",
+        storageBucket: "rim-logistics.firebasestorage.app",
+        messagingSenderId: "440070923711",
+        appId: "1:440070923711:web:f02d58467098390ff8ad0a",
+        measurementId: "G-TWM27F18EL"
+    };
+
+    const ADMIN_PASSCODE = "RIM2026";
+
+    // Initialize
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+    const recordsRef = db.ref('warehouse_records');
+
+    // Live Cloud Sync
+    recordsRef.on('value', (snapshot) => {
+        renderTable(snapshot.val());
+        document.getElementById('syncStatus').innerText = "✅ Cloud Synced";
+    });
+
+    // --- 2. REGISTRATION LOGIC ---
+    function processRecord() {
+        const name = document.getElementById('opName').value.trim();
+        const rim = document.getElementById('rimId').value.trim().toUpperCase();
+        
+        if (!name) { alert("Please identify yourself in the top bar."); return; }
+        if (rim.length !== 14 || !rim.startsWith("RIM")) {
+            alert("Invalid RIM ID. Must be 14 characters starting with 'RIM'.");
+            return;
+        }
+
+        const newEntry = {
+            op: name,
+            time: new Date().toLocaleString(),
+            rim: rim,
+            loc: document.getElementById('loc').value.trim() || "TBD",
+            status: document.getElementById('stat').value,
+            details: document.getElementById('details').value.trim() || "None"
+        };
+
+        recordsRef.push(newEntry);
+
+        // Reset
+        document.getElementById('rimId').value = '';
+        document.getElementById('details').value = '';
+        document.getElementById('rimId').focus();
+    }
+
+    // --- 3. UI RENDERING ---
+    function renderTable(data) {
+        const tableBody = document.getElementById('mainTable');
+        const role = document.getElementById('roleSelector').value;
+        tableBody.innerHTML = '';
+        if (!data) return;
+
+        Object.keys(data).reverse().forEach(key => {
+            const r = data[key];
+            let actions = (role === 'admin') ? 
+                `<td class="no-print"><button onclick="deleteEntry('${key}')" style="color:red; background:none; border:none; cursor:pointer; font-weight:bold;">Delete</button></td>` : '';
+            
+            tableBody.innerHTML += `<tr>
+                <td style="color:#1a237e; font-weight:bold;">${r.op}</td>
+                <td style="color:#888; font-size:0.75rem;">${r.time}</td>
+                <td><code>${r.rim}</code></td>
+                <td>${r.loc}</td>
+                <td><span class="badge status-${r.status}">${r.status}</span></td>
+                ${actions}
+            </tr>`;
+        });
+    }
+
+    function updateUI() {
+        const roleSel = document.getElementById('roleSelector');
+        if (roleSel.value === 'admin') {
+            const pass = prompt("Admin Passcode:");
+            if (pass !== ADMIN_PASSCODE) {
+                alert("Incorrect Passcode.");
+                roleSel.value = "user";
+                return;
+            }
+        }
+        document.getElementById('adminActionHeader').classList.toggle('hidden', roleSel.value !== 'admin');
+        document.getElementById('masterClear').classList.toggle('hidden', roleSel.value !== 'admin');
+        recordsRef.once('value', (s) => renderTable(s.val()));
+    }
+
+    // --- 4. DATA MANAGEMENT ---
+    function deleteEntry(key) {
+        if(confirm("Permanently delete this cloud record?")) {
+            db.ref('warehouse_records/' + key).remove();
+        }
+    }
+
+    function clearAllData() {
+        if(confirm("ADMIN: Delete ALL cloud data permanently?")) {
+            if(confirm("FINAL WARNING: This cannot be reversed. Clear?")) {
+                recordsRef.remove();
+            }
+        }
+    }
+
+    function exportCSV() {
+        recordsRef.once('value', (snapshot) => {
+            const data = snapshot.val();
+            if(!data) return;
+            let csv = "Time,Operator,RIM_ID,Location,Status,Details\n";
+            Object.values(data).forEach(r => {
+                csv += `"${r.time}","${r.op}","${r.rim}","${r.loc}","${r.status}","${r.details}"\n`;
+            });
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `RIM_Logistics_Export.csv`;
+            a.click();
+        });
+    }
+</script>
+
+</body>
+</html>
